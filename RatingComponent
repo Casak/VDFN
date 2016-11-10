@@ -1,0 +1,470 @@
+package com.mts.rating.component;
+
+import net.minidev.json.JSONArray;
+import net.minidev.json.JSONObject;
+import net.minidev.json.JSONValue;
+
+import java.io.InputStreamReader;
+import java.text.DecimalFormat;
+import java.util.Map.Entry;
+
+public class RatingComponent {
+
+	private final static String TEMPLATE_SUFFIX = ".tpl";
+
+	private final String programId;
+	private final JSONObject template;
+	private final JSONObject include;
+
+	private String version;
+
+	public RatingComponent(String programId) {
+		this.programId = programId;
+		String resource = programId.concat(TEMPLATE_SUFFIX);
+		template = (JSONObject) JSONValue.parse(new InputStreamReader(getClass().getResourceAsStream(resource)));
+		include = (JSONObject) template.get("include");
+	}
+
+	public JSONObject parse(String string) {
+		String type = (String) template.get("type");
+		this.version = "";
+		if (type == null || type.isEmpty() || type.equals("object")) {
+			return parseObject(string, template);
+		} else if (type.equals("extension")) {
+			return parseExtension(string, template);
+		} else {
+			return null;
+		}
+	}
+
+	private JSONObject parseExtension(String string, JSONObject template) {
+		JSONObject result = new JSONObject();
+		StringBuilder sb = new StringBuilder();
+		String wrapper = (String) template.get("wrapper");
+		String delimiter = (String) template.get("delimiter");
+		String wrapperIn = wrapper.substring(0,1);
+		String wrapperOut = wrapper.substring(1,2);
+		boolean inside = false;
+		string = string.concat(delimiter);
+		for (int i = 0; i < string.length(); i++) {
+			String chr = string.substring(i,i+1);
+			if (! inside && (delimiter.equals(chr) | chr.equals("†"))) {
+				String extension = sb.toString();
+				String parts[] = extension.split("=", 2);
+				String types[] = parts[0].split(":");
+				result.put(parts[0], parseObject(parts[1], (JSONObject) include.get(types[1])));
+				sb.setLength(0);
+			} else {
+				sb.append(chr);
+				if (! inside && wrapperIn.equals(chr)) {
+					inside = true;
+				} else if (inside && wrapperOut.equals(chr)) {
+					inside = false;
+				}
+			}
+		}
+		return result;
+	}
+
+	private JSONObject parseObject(String string, JSONObject template) {
+		if (template.size() == 1) {
+			template = (JSONObject) include.get(template.get("name"));
+		}
+		JSONObject result = new JSONObject();
+		if (template.containsKey("wrapped")) {
+			string = string.substring(1, string.length() - 1);
+		}
+		if (template.containsKey("version") && string.startsWith("VER:")) {
+			result.put("Version", this.version = string.substring(0, 6));
+			string = string.substring(6);
+		}
+		if (template.containsKey("header")) {
+			int pos = string.indexOf("=");
+			if (pos >= 0) {
+				result.put("Header", string.substring(0, pos));
+				string = string.substring(pos + 1);
+			}
+		}
+		String delimiter = (String) template.get("delimiter");
+		JSONArray objects = (JSONArray) template.get("objects");
+		int count = objects.size();
+		String parts[] = string.split("\\" + delimiter, count);
+		for (int i = 0, k = 0; i < parts.length; i++, k++) {
+			JSONObject part = (JSONObject) objects.get(k);
+			String name = (String) part.get("name");
+			while (k < objects.size()) {
+				if (part.size() == 1) {
+					part = (JSONObject) include.get(name);
+					name = (String) part.get("name");
+				}
+				if (part.containsKey("version") && ! this.version.equals(part.get("version"))) {
+					part = (JSONObject) objects.get(++k);
+					name = (String) part.get("name");
+					continue;
+				}
+				break;
+			};
+			if (name.equals("Thresholds") && programId.equals("PriceTypeExtension") && this.version.isEmpty()) {
+				JSONArray thresholds = (JSONArray) parseItem(parts[i], (JSONObject) include.get("ThresholdsVer00"));
+				JSONArray encode = new JSONArray();
+				for (Object obj : thresholds) {
+					JSONObject th = (JSONObject) obj;
+					JSONObject threshold = new JSONObject();
+					JSONObject price = new JSONObject();
+					JSONObject pricePerUnit = new JSONObject();
+					threshold.put("Value", th.get("ThresholdValue"));
+					threshold.put("Unit",  th.get("ThresholdUnit"));
+					pricePerUnit.put("Price", th.get("PricePerUnit"));
+					pricePerUnit.put("Unit",  th.get("PriceUnit"));
+					price.put("PricePerUnit", pricePerUnit);
+					JSONObject thresholNew = new JSONObject();
+					thresholNew.put("Threshold", threshold);
+					thresholNew.put("Price", price);
+					encode.add(thresholNew);
+				}
+				result.put(name, encode);
+			} else {
+				result.put(name, parseItem(parts[i], part));
+			}
+		}
+		return result;
+	}
+
+	private Object parseItem(String string, JSONObject template) {
+		String type = (String) template.getOrDefault("type", "object");
+		switch (type) {
+		case "object":
+			return parseObject(string, template);
+		case "array":
+			return parseArray(string, template);
+		case "array-object":
+			return parseArrayObject(string, template);
+		case "string":
+			return string;
+		case "integer":
+		case "long":
+			return string.isEmpty() ? string : Long.valueOf(string);
+		case "boolean":
+			return parseBoolean(string, template);
+		case "decimal":
+			Boolean percent = (Boolean) template.get("percent");
+			if (percent == null || ! percent) {
+				return string.isEmpty() ? string : Double.valueOf(string);
+			} else {
+				return string.isEmpty() ? string : decimalPercent(string);
+			}
+		case "decimal-million":
+			return string.isEmpty() ? string : Double.valueOf(Double.valueOf(string).doubleValue() / 1000000);
+		default:
+			return null;
+		}
+	}
+
+	private Object parseBoolean(String string, JSONObject template) {
+		if (string.isEmpty()) return string;
+		Integer value = Integer.valueOf(string);
+		if (template.containsKey("values")) {
+			JSONArray values = (JSONArray) template.get("values");
+			Integer value1 = (Integer) values.get(1);
+			return Boolean.valueOf(value == value1);
+		} else {
+			return Boolean.valueOf(value == 1);
+		}
+	}
+
+	private Object decimalPercent(String string) {
+		boolean percent = false;
+		if (string.endsWith("%")) {
+			percent = true;
+			string = string.substring(0, string.length() - 1);
+		}
+		Double value = Double.valueOf(string);
+		if (! percent) {
+			return value;
+		} else {
+			JSONObject result = new JSONObject();
+			result.put("value", value);
+			result.put("percent", Boolean.TRUE);
+			return result;
+		}
+	}
+
+	private JSONArray parseArray(String string, JSONObject template) {
+		JSONArray result = new JSONArray();
+		if (string == null || string.isEmpty()) {
+			return result;
+		}
+		String delimiter = (String) template.get("delimiter");
+		String parts[] = string.split("\\" + delimiter);
+		template = (JSONObject) template.get("object");
+		for (int i = 0; i < parts.length; i++) {
+			result.add(parseItem(parts[i], template));
+		}
+		return result;
+	}
+
+	private JSONArray parseArrayObject(String string, JSONObject template) {
+		JSONArray result = new JSONArray();
+		if (string == null || string.isEmpty()) {
+			return result;
+		}
+		String delimiter = (String) template.get("delimiter");
+		String parts[] = string.split("\\" + delimiter);
+		JSONArray objects = (JSONArray) template.get("objects");
+		Integer count = objects.size();
+		for (int i = 0; i < parts.length; i += count) {
+			JSONObject object = new JSONObject();
+			for (int k = 0; k < count; k++) {
+				JSONObject part = (JSONObject) objects.get(k);
+				String name = (String) part.get("name");
+				if (part.size() == 1) {
+					part = (JSONObject) include.get(name);
+					name = (String) part.get("name");
+				}
+				object.put(name, parseItem(parts[i+k], part));
+			}
+			result.add(object);
+		}
+		return result;
+	}
+
+	public String serialize(JSONObject object) {
+		this.version = "";
+		return objectToString(object, template);
+	}
+
+	private String objectToString(JSONObject object, JSONObject template) {
+		StringBuilder result = new StringBuilder();
+		if (template.containsKey("wrapped")) result.append("{");
+		if (template.containsKey("version") && object.containsKey("Version")) result.append(this.version = (String) object.get("Version"));
+		if (template.containsKey("header") && object.containsKey("Header")) result.append(object.get("Header") + "=");
+		String type = (String) template.get("type");
+		if (type != null && type.equals("extension")) {
+			result.append(extensionToString(object, template));
+		} else {
+			String delimiter = (String) template.get("delimiter");
+			JSONArray items = (JSONArray) template.get("objects");
+			boolean first = true;
+			for (Object obj : items) {
+				JSONObject part = (JSONObject) obj;
+				String name = (String) part.get("name");
+				if (part.size() == 1) {
+					part = (JSONObject) include.get(name);
+					name = (String) part.get("name");
+				}
+				if (part.containsKey("version")) {
+					if (! this.version.equals(part.get("version"))) continue;
+				}
+				Object next = object.get(name);
+				if (next == null) {
+					break;
+				}
+				if (first) {
+					first = false;
+				} else {
+					result.append(delimiter);
+				}
+				if (name.equals("Thresholds") && programId.equals("PriceTypeExtension") && this.version.isEmpty()) {
+					JSONArray thresholds = (JSONArray) next;
+					JSONArray encode = new JSONArray();
+					for (Object obj1 : thresholds) {
+						JSONObject th = (JSONObject) obj1;
+						JSONObject threshold = (JSONObject) th.get("Threshold");
+						JSONObject price = (JSONObject) th.get("Price");
+						JSONObject pricePerFact = new JSONObject();
+						if(price.containsKey("PricePerFact") && price.get("PricePerFact") != null) pricePerFact.put("Price", price.get("PricePerFact"));
+						else pricePerFact.put("Price", ((JSONObject)price.get("PricePerUnit")).get("Price"));
+						JSONObject pricePerUnit = (JSONObject) price.get("PricePerUnit");
+						pricePerFact.put("Unit", pricePerUnit.get("Unit"));
+						JSONObject th1 = new JSONObject();
+						th1.put("ThresholdValue", threshold.get("Value"));
+						th1.put("ThresholdUnit", threshold.get("Unit"));
+						if(pricePerFact.get("Price").equals(0.0)) th1.put("PricePerUnit", pricePerUnit.get("Price"));
+						else th1.put("PricePerUnit", pricePerFact.get("Price"));
+						th1.put("PriceUnit", pricePerFact.get("Unit"));
+						encode.add(th1);
+					}
+					next = encode;
+					part = (JSONObject) include.get("ThresholdsVer00");
+				}
+				result.append(itemToString(next, part));
+			}
+		}
+		if (template.containsKey("wrapped")) result.append("}");
+		return result.toString();
+	}
+
+	private String extensionToString(JSONObject object, JSONObject template) {
+		StringBuilder result = new StringBuilder();
+		String delimiter = (String) template.get("delimiter");
+		for (Entry<String,Object> entry : object.entrySet()) {
+			if (result.length() > 0) {
+				result.append(delimiter);
+			}
+			String types[] = entry.getKey().split(":");
+			JSONObject value = (JSONObject) entry.getValue();
+			result.append(entry.getKey() + "=");
+			result.append(objectToString(value, (JSONObject) include.get(types[1])));
+		}
+		return result.toString();
+	}
+
+	private String itemToString(Object value, JSONObject template) {
+		String type = (String) template.getOrDefault("type", "object");
+		switch (type) {
+		case "object":
+			return objectToString((JSONObject) value, template);
+		case "array":
+			return arrayToString((JSONArray) value, template);
+		case "array-object":
+			return arrayObjectToString((JSONArray) value, template);
+		case "string":
+		case "integer":
+		case "long":
+			return value.toString();
+		case "boolean":
+			return booleanToString(value, template);
+		case "decimal":
+			if (value instanceof Double) {
+				return doubleToString((Double) value);
+			} else if (value instanceof String || value instanceof Long || value instanceof Integer) {
+				return value.toString();
+			} else {
+				JSONObject object = (JSONObject) value;
+				Boolean percent = (Boolean) object.get("percent");
+				if (percent == null || ! percent) {
+					return doubleToString((Double) object.get("value"));
+				} else {
+					return doubleToString((Double) object.get("value")).concat("%");
+				}
+			}
+		case "decimal-million":
+			Double val = (Double) value * 1000000;
+			return Long.toString(val.intValue());
+		default:
+			return "";
+		}
+	}
+
+	public String booleanToString(Object value, JSONObject template) {
+		if (value instanceof Boolean) {
+			if (template.containsKey("values")) {
+				JSONArray values = (JSONArray) template.get("values");
+				return (Boolean) value ? values.get(1).toString() : values.get(0).toString();
+			} else {
+				return (Boolean) value ? "1" : "0";
+			}
+		}
+		return value.toString();
+	}
+
+	public static String doubleToString(Double value) {
+		DecimalFormat formatter = new DecimalFormat("0.000000000000");
+		String string = formatter.format(value).replace(',', '.');
+    	while (string.endsWith("0")) {
+    		string = string.substring(0, string.length() - 1);
+    	}
+    	if (string.endsWith(".")) {
+    		string = string.substring(0, string.length() - 1);
+    	}
+        return string;
+	}
+
+	private String arrayToString(JSONArray array, JSONObject template) {
+		String delimiter = (String) template.get("delimiter");
+		JSONObject object = (JSONObject) template.get("object");
+
+		String name = (String) template.get("name");
+			if(programId.equals("DurationCharging") && ("SpendingIntervals".equals(name) || "AccumulationIntervals".equals(name))){
+        	object.remove("name");
+				object.put("delimiter", "@");
+				JSONArray objects =	new JSONArray();
+
+				JSONObject weekDay = new JSONObject();
+				weekDay.put("name", "WeekDay");
+				weekDay.put("type", "integer");
+
+				JSONObject timeFrom = new JSONObject();
+				timeFrom.put("name", "TimeFrom");
+				timeFrom.put("type", "string");
+
+				JSONObject timeTo = new JSONObject();
+				timeTo.put("name", "TimeTo");
+				timeTo.put("type", "integer");
+
+				objects.add(weekDay);
+				objects.add(timeFrom);
+				objects.add(timeTo);
+
+				object.put("objects", objects);
+            }
+
+		StringBuilder result = new StringBuilder();
+		boolean first = true;
+		for (Object obj : array) {
+			if (first) {
+				first = false;
+			} else {
+				result.append(delimiter);
+			}
+			result.append(itemToString(obj, object));
+		}
+		return result.toString();
+	}
+
+	private String arrayObjectToString(JSONArray array, JSONObject template) {
+		String delimiter = (String) template.get("delimiter");
+		StringBuilder result = new StringBuilder();
+		for (Object obj : array) {
+			if (result.length() > 0) {
+				result.append(delimiter);
+			}
+			result.append(objectToString((JSONObject) obj, template));
+		}
+		return result.toString();
+	}
+
+	public static void main(String[] args) {
+//		String params = "00:00:00@1@0|0|0|1|0|0|0@@0|0#00:00:00@1@0#0#0#0#1!!#0!0!0!0!0@1@2!0!0!!!0!!!!!#0!0!!!#0#@0@@0|0|0#00:00:00@1@0####0#0#0#0$0$0$1!!#0!0!!!#0!0!!!#0#@0@@0|0|#0#00:00:00$0$1$0$1!!#0!0!0!0!0@1@2!0!0!!!0!!!!!#0!0!!!|1|POPCOFU91#12#00:00:00$0$1$0$?01:00:00$13$14$1$02:00:00#0!0!!!#0!0!!!|1@2@3@0|0||0@@0*0*0#00:00:00@1@0#0#0#0#1!!#0!0!0!0!0@1@2!0!0!!!0!!!!!#0!0!!!#0#@0@@0*0*0#00:00:00@1@0####0#0#0#0$0$0$1!!#0!0!!!#0!0!!!#0#@0@@0*0*#0#00:00:00$0$1$0$1!!#0!0!0!0!0@1@2!0!0!!!0!!!!!#0!0!!!*0*#0#00:00:00$0$1$0$#0!0!!!#0!0!!!*1@2@3@0|0||0||0|0@@0*0*0#00:00:00@1@0#0#0#0#1!!#0!0!0!0!0@1@2!0!0!!!0!!!!!#0!0!!!#0#@0@@0*0*0#00:00:00@1@0####0#0#0#0$0$0$1!!#0!0!!!#0!0!!!#0#@0@@0*0*#0#00:00:00$0$1$0$1!!#0!0!0!0!0@1@2!0!0!!!0!!!!!#0!0!!!*0*#0#00:00:00$0$1$0$#0!0!!!#0!0!!!*1@2@3@0|0!0!!!||0!0!0!0!0@1@2!0!0!!!0!!!!!|TPP;FF;FFLGO;FFLJU;FFOFF;FFPAR;FFPLR;FFPOR;CUG;KOM;BP|0|0";
+//		String params = "00:00:00@60@0|0|0|1|0|0|0@@0|0#00:00:00@1@0#1.2#2.555#1#0!CRM193@0@0@20%@20%@0@1@0@1!CRM193@0@@;CRM193@1@@;CRM193@2@@;CRM193@3@@;CRM193@4@@;CRM193@5@@;CRM193@6@@#0!1!1!0!0@1@2!0!0!!!0!!!!!#1!0!SUP100@0@1@@1@FR25DAY@0;MIBZL@0@1@@1@@0!MIBZL@0@@;MIBZL@1@@;MIBZL@2@@;MIBZL@3@@;MIBZL@4@@;MIBZL@5@@;MIBZL@6@@;SUP100@0@@;SUP100@1@@;SUP100@2@@;SUP100@3@@;SUP100@4@@;SUP100@5@@;SUP100@6@@!#0#@0@@0|0|0#00:00:00@1@0#SUP100#FR25DAY##0.2725#0#1#0$0$0$0!!?6000$0.252$0$0!!#0!0!!!#0!0!!!#0#@0@@0|0|#0#00:00:00$0$1$0$0!!#0!1!1!0!0@1@2!0!0!!!0!!!!!#0!0!!!|0|#0#00:00:00$0$1$0$#0!0!!!#0!0!!!|0@1@2@3|0||0@@0*0*0#00:00:00@1@0#0#0#0#0!!#0!1!1!0!0@1@2!0!0!!!0!!!!!#0!0!!!#0#@0@@0*0*0#00:00:00@1@0####0#0#0#0$0$0$0!!#0!0!!!#0!0!!!#0#@0@@0*0*#0#00:00:00$0$1$0$0!!#0!1!1!0!0@1@2!0!0!!!0!!!!!#0!0!!!*0*#0#00:00:00$0$1$0$#0!0!!!#0!0!!!*0@1@2@3|0||0||0|0@@0*0*0#00:00:00@1@0#0#0#0#0!!#0!1!1!0!0@1@2!0!0!!!0!!!!!#0!0!!!#0#@0@@0*0*0#00:00:00@1@0####0#0#0#0$0$0$0!!#0!0!!!#0!0!!!#0#@0@@0*0*#0#00:00:00$0$1$0$0!!#0!1!1!0!0@1@2!0!0!!!0!!!!!#0!0!!!*0*#0#00:00:00$0$1$0$#0!0!!!#0!0!!!*0@1@2@3|1!0!SUP100@0@1@@1@@0;MIBZL@0@1@@1@@0!MIBZL@0@@;MIBZL@1@@;MIBZL@2@@;MIBZL@3@@;MIBZL@4@@;MIBZL@5@@;MIBZL@6@@;SUP100@0@@;SUP100@1@@;SUP100@2@@;SUP100@3@@;SUP100@4@@;SUP100@5@@;SUP100@6@@!||0!1!1!0!0@1@2!0!0!!!1!DISCO10@0@0@10@10@0!DISCO10@1@@;DISCO10@2@@;DISCO10@3@@;DISCO10@4@@;DISCO10@5@@;DISCO10@6@@;DISCO10@0@@!!!|BP;TPP;FF;FFLGO;FFLJU;FFOFF;FFPAR;FFPLR;FFPOR;CUG;KOM|0|0";
+//		RatingComponent rc = RatingComponentFactory.createRatingComponent("FFWithPriorityRulesAdvanced");
+//		String params = "00:00:00@1*0*0*0*0.332*0*0*0*0*0|0*1*0.504#@@0#0#0!!*0*#0##0#1#1###0$0$@@0*0*#0##1#1###0$0$@@0*0*#00:00:00$0$@@0*0*0!!*1*0!0!OSU9@0@0@60@@1;AMA@0@1@0@@1.0625!OSU9@1@00:00@00:00;OSU9@2@00:00@00:00;OSU9@3@00:00@00:00;OSU9@4@00:00@00:00;OSU9@5@00:00@00:00;OSU9@6@00:00@00:00;OSU9@0@00:00@00:00;AMA@1@00:00@00:00;AMA@2@00:00@00:00;AMA@3@00:00@00:00;AMA@4@00:00@00:00;AMA@5@00:00@00:00;AMA@6@00:00@00:00;AMA@0@00:00@00:00*3@0@1@2|0|||0*1*0#@@0#0#0!!*0*#0##0#1#1###0$0$@@0*0*#0##1#1###0$0$@@0*0*#00:00:00$0$@@0*0*0!!*0*0!0!!*0@1@2@3|FF*1*1*0#@@0#0#0!!*1*FFCALL#0##1#0#1##1@00:00@00:00;2@00:00@00:00;3@00:00@00:00;4@00:00@00:00;5@00:00@00:00;6@00:00@00:00;0@00:00@00:00#0$0$@@59.4?1$0$@@0?301$0$@@0.504*0*#0##1#1###0$0$@@0*0*#00:00:00$0$@@0*0*0!!*0*0!0!!*0@1@2@3|0|§§0*1*0#@@0#0#0!!*0*#0##0#1#1###0$0$@@0*0*#0##1#1###0$0$@@0*0*#00:00:00$0$@@0*0*0!!*0*0!0!!*0@1@2@3|0|0!!|1|0!0!AMA@0@1@0@@1.0625!AMA@1@00:00@00:00;AMA@2@00:00@00:00;AMA@3@00:00@00:00;AMA@4@00:00@00:00;AMA@5@00:00@00:00;AMA@6@00:00@00:00;AMA@0@00:00@00:00|FF;BP;TPP;CUG;FA;HH;MLC";
+//		String params = "00:00:00@1*0*0*0*0*0*1*0*0*0|0*1*3#@@0#1#0!TSTHH1@0@0@1;TSTHH2@0@0@2!TSTHH1@1@13:00@14:00;TSTHH1@2@13:00@14:00;TSTHH1@3@13:00@14:00;TSTHH1@4@13:00@14:00;TSTHH1@5@13:00@14:00;TSTHH1@6@13:00@14:00;TSTHH1@0@13:00@14:00;TSTHH2@1@13:00@14:00;TSTHH2@2@13:00@14:00;TSTHH2@3@13:00@14:00;TSTHH2@4@13:00@14:00;TSTHH2@5@13:00@14:00;TSTHH2@6@13:00@14:00;TSTHH2@0@13:00@14:00*0*#0##0#1#1###0$0$@@0*0*#0##1#1###0$0$@@0*0*#00:00:00$0$@@0*0*0!!*0*0!0!!*3@0@1@2|0|||0*1*0#@@0#0#0!!*0*#0##0#1#1###0$0$@@0*0*#0##1#1###0$0$@@0*0*#00:00:00$0$@@0*0*0!!*0*0!0!!*0@1@2@3||0|§§0*1*0#@@0#0#0!!*0*#0##0#1#1###0$0$@@0*0*#0##1#1###0$0$@@0*0*#00:00:00$0$@@0*0*0!!*0*0!0!!*0@1@2@3|0|0!!|0|0!0!!|TPP;FF;CUG;FA;HH;MLC;BP";
+//		RatingComponent rc = RatingComponentFactory.createRatingComponent("DurationCharging");
+//		String params = "0*1*1.05#@@0#0#0!!*1*KMM#0#FRSK3D#1#1###0$0.1$@@0?1$0$@@0?10$1.05$@@0*0*#0##1#1###0$0$@@0#1*0*0!!~1~0~0@1~0~*1*0!AMA@0@1@FRWK3D@1.0625!AMA@1@00:00@00:00;AMA@2@00:00@00:00;AMA@3@00:00@00:00;AMA@4@00:00@00:00;AMA@5@00:00@00:00;AMA@6@00:00@00:00;AMA@0@00:00@00:00!1@2@0!0*0@2@1@3*0*#0##1##0$0$@@0|0|||0*0*0#@@0#0#0!!*0*#0##1#1###0$0$@@0*0*#0##1#1###0$0$@@0#1*0*0!!~1~0~0@1~0~*0*0!!!0@1@2!0*0@1@2@3*0*#0##1##0$0$@@0||0|§§0*0*0#@@0#0#0!!*0*#0##1#1###0$0$@@0*0*#0##1#1###0$0$@@0#1*0*0!!~1~0~0@1~0~*0*0!!!0@1@2!0*0@1@2@3*0*#0##1##0$0$@@0|1|1!DISCO10@0@0@10!DISCO10@1@00:00@00:00;DISCO10@2@00:00@00:00;DISCO10@3@00:00@00:00;DISCO10@4@00:00@00:00;DISCO10@5@00:00@00:00;DISCO10@6@00:00@00:00;DISCO10@0@00:00@00:00~1~0~0@1~0~|0|0!!!0@1@2!0|BP;TPP;FF;CUG;FA;HH;MLC|";
+//		String params = "0*1*0.65#@@0#0#0!!*0*#0##1#1###0$0$@@0*0*#0##1#1###0$0$@@0#1*0*0!!~1~0~0@1~0~*1*0!SMSMS@0@0@@1;SUP20S@0@0@@1;UKS@0@0@@1;SMTS@0@0@@1;CS20MS@0@0@@1;CS50MS@0@0@@1;CS100MS@0@0@@1;CS200MS@0@0@@1;BNSMS@0@0@@1;S100@0@0@@1;AMA@0@1@@1.0625!SMSMS@1@00:00@00:00;SMSMS@2@00:00@00:00;SMSMS@3@00:00@00:00;SMSMS@4@00:00@00:00;SMSMS@5@00:00@00:00;SMSMS@6@00:00@00:00;SMSMS@0@00:00@00:00;SMTS@1@00:00@00:00;SMTS@2@00:00@00:00;SMTS@3@00:00@00:00;SMTS@4@00:00@00:00;SMTS@5@00:00@00:00;SMTS@6@00:00@00:00;SMTS@0@00:00@00:00;BNSMS@1@00:00@00:00;BNSMS@2@00:00@00:00;BNSMS@3@00:00@00:00;BNSMS@4@00:00@00:00;BNSMS@5@00:00@00:00;BNSMS@6@00:00@00:00;BNSMS@0@00:00@00:00;S100@1@00:00@00:00;S100@2@00:00@00:00;S100@3@00:00@00:00;S100@4@00:00@00:00;S100@5@00:00@00:00;S100@6@00:00@00:00;S100@0@00:00@00:00;AMA@1@00:00@00:00;AMA@2@00:00@00:00;AMA@3@00:00@00:00;AMA@4@00:00@00:00;AMA@5@00:00@00:00;AMA@6@00:00@00:00;AMA@0@00:00@00:00;SUP20S@1@00:00@00:00;SUP20S@2@00:00@00:00;SUP20S@3@00:00@00:00;SUP20S@4@00:00@00:00;SUP20S@5@00:00@00:00;SUP20S@6@00:00@00:00;SUP20S@0@00:00@00:00;UKS@1@00:00@00:00;UKS@2@00:00@00:00;UKS@3@00:00@00:00;UKS@4@00:00@00:00;UKS@5@00:00@00:00;UKS@6@00:00@00:00;UKS@0@00:00@00:00;CS20MS@1@00:00@00:00;CS20MS@2@00:00@00:00;CS20MS@3@00:00@00:00;CS20MS@4@00:00@00:00;CS20MS@5@00:00@00:00;CS20MS@6@00:00@00:00;CS20MS@0@00:00@00:00;CS50MS@1@00:00@00:00;CS50MS@2@00:00@00:00;CS50MS@3@00:00@00:00;CS50MS@4@00:00@00:00;CS50MS@5@00:00@00:00;CS50MS@6@00:00@00:00;CS50MS@0@00:00@00:00;CS100MS@1@00:00@00:00;CS100MS@2@00:00@00:00;CS100MS@3@00:00@00:00;CS100MS@4@00:00@00:00;CS100MS@5@00:00@00:00;CS100MS@6@00:00@00:00;CS100MS@0@00:00@00:00;CS200MS@1@00:00@00:00;CS200MS@2@00:00@00:00;CS200MS@3@00:00@00:00;CS200MS@4@00:00@00:00;CS200MS@5@00:00@00:00;CS200MS@6@00:00@00:00;CS200MS@0@00:00@00:00!0@1@2!0*0@1@2@3*0*#0##1##0$0$@@0|0|||0*0*0#@@0#0#0!!*0*#0##1#1###0$0$@@0*0*#0##1#1###0$0$@@0#1*0*0!!~1~0~0@1~0~*0*0!!!0@1@2!0*0@1@2@3*0*#0##1##0$0$@@0||0|§§0*0*0#@@0#0#0!!*0*#0##1#1###0$0$@@0*0*#0##1#1###0$0$@@0#1*0*0!!~1~0~0@1~0~*0*0!!!0@1@2!0*0@1@2@3*0*#0##1##0$0$@@0|1|1!FRBN10@0@0@10@0!FRBN10@1@00:00@00:00;FRBN10@2@00:00@00:00;FRBN10@3@00:00@00:00;FRBN10@4@00:00@00:00;FRBN10@5@00:00@00:00;FRBN10@6@00:00@00:00;FRBN10@0@00:00@00:00~1~0~0@1~0~|0|0!!!0@1@2!0|BP;TPP;FF;FFPOP;CUG;FA;HH;MLC;FFPUA;CUGPL;CUGPV;CUGPP||0*0*0*@0@@0";
+//		String params = "0*1*0.65#@@0#0#0!!*0*#0##1#1###0$0$@@0*0*#0##1#1###0$0$@@0#1*0*0!!~1~0~0@1~0~*1*0!SMSMS@0@0@@1;SUP20S@0@0@@1;SUP60S@0@0@@1;MAXS@0@0@@1;SMARTS@0@0@@1;UKS@0@0@@1;ALS@0@0@@1;SMTS@0@0@@1;CS20MS@0@0@@1;CS50MS@0@0@@1;CS100MS@0@0@@1;CS200MS@0@0@@1;BNSMS@0@0@@1;S100@0@0@@1;AMA@0@1@@1.0625!SMSMS@1@00:00@00:00;SMSMS@2@00:00@00:00;SMSMS@3@00:00@00:00;SMSMS@4@00:00@00:00;SMSMS@5@00:00@00:00;SMSMS@6@00:00@00:00;SMSMS@0@00:00@00:00;SMTS@1@00:00@00:00;SMTS@2@00:00@00:00;SMTS@3@00:00@00:00;SMTS@4@00:00@00:00;SMTS@5@00:00@00:00;SMTS@6@00:00@00:00;SMTS@0@00:00@00:00;BNSMS@1@00:00@00:00;BNSMS@2@00:00@00:00;BNSMS@3@00:00@00:00;BNSMS@4@00:00@00:00;BNSMS@5@00:00@00:00;BNSMS@6@00:00@00:00;BNSMS@0@00:00@00:00;S100@1@00:00@00:00;S100@2@00:00@00:00;S100@3@00:00@00:00;S100@4@00:00@00:00;S100@5@00:00@00:00;S100@6@00:00@00:00;S100@0@00:00@00:00;AMA@1@00:00@00:00;AMA@2@00:00@00:00;AMA@3@00:00@00:00;AMA@4@00:00@00:00;AMA@5@00:00@00:00;AMA@6@00:00@00:00;AMA@0@00:00@00:00;SUP20S@1@00:00@00:00;SUP20S@2@00:00@00:00;SUP20S@3@00:00@00:00;SUP20S@4@00:00@00:00;SUP20S@5@00:00@00:00;SUP20S@6@00:00@00:00;SUP20S@0@00:00@00:00;UKS@1@00:00@00:00;UKS@2@00:00@00:00;UKS@3@00:00@00:00;UKS@4@00:00@00:00;UKS@5@00:00@00:00;UKS@6@00:00@00:00;UKS@0@00:00@00:00;SUP60S@1@00:00@00:00;SUP60S@2@00:00@00:00;SUP60S@3@00:00@00:00;SUP60S@4@00:00@00:00;SUP60S@5@00:00@00:00;SUP60S@6@00:00@00:00;SUP60S@0@00:00@00:00;MAXS@1@00:00@00:00;MAXS@2@00:00@00:00;MAXS@3@00:00@00:00;MAXS@4@00:00@00:00;MAXS@5@00:00@00:00;MAXS@6@00:00@00:00;MAXS@0@00:00@00:00;SMARTS@1@00:00@00:00;SMARTS@2@00:00@00:00;SMARTS@3@00:00@00:00;SMARTS@4@00:00@00:00;SMARTS@5@00:00@00:00;SMARTS@6@00:00@00:00;SMARTS@0@00:00@00:00;CS20MS@1@00:00@00:00;CS20MS@2@00:00@00:00;CS20MS@3@00:00@00:00;CS20MS@4@00:00@00:00;CS20MS@5@00:00@00:00;CS20MS@6@00:00@00:00;CS20MS@0@00:00@00:00;CS50MS@1@00:00@00:00;CS50MS@2@00:00@00:00;CS50MS@3@00:00@00:00;CS50MS@4@00:00@00:00;CS50MS@5@00:00@00:00;CS50MS@6@00:00@00:00;CS50MS@0@00:00@00:00;CS100MS@1@00:00@00:00;CS100MS@2@00:00@00:00;CS100MS@3@00:00@00:00;CS100MS@4@00:00@00:00;CS100MS@5@00:00@00:00;CS100MS@6@00:00@00:00;CS100MS@0@00:00@00:00;CS200MS@1@00:00@00:00;CS200MS@2@00:00@00:00;CS200MS@3@00:00@00:00;CS200MS@4@00:00@00:00;CS200MS@5@00:00@00:00;CS200MS@6@00:00@00:00;CS200MS@0@00:00@00:00;ALS@1@00:00@00:00;ALS@2@00:00@00:00;ALS@3@00:00@00:00;ALS@4@00:00@00:00;ALS@5@00:00@00:00;ALS@6@00:00@00:00;ALS@0@00:00@00:00!0@1@2!0*0@1@2@3*0*#0##1##0$0$@@0|0|||0*0*0#@@0#0#0!!*0*#0##1#1###0$0$@@0*0*#0##1#1###0$0$@@0#1*0*0!!~1~0~0@1~0~*0*0!!!0@1@2!0*0@1@2@3*0*#0##1##0$0$@@0||0|§§0*0*0#@@0#0#0!!*0*#0##1#1###0$0$@@0*0*#0##1#1###0$0$@@0#1*0*0!!~1~0~0@1~0~*0*0!!!0@1@2!0*0@1@2@3*0*#0##1##0$0$@@0|1|1!FRBN10@0@0@10@0!FRBN10@1@00:00@00:00;FRBN10@2@00:00@00:00;FRBN10@3@00:00@00:00;FRBN10@4@00:00@00:00;FRBN10@5@00:00@00:00;FRBN10@6@00:00@00:00;FRBN10@0@00:00@00:00~1~0~0@1~0~|0|0!!!0@1@2!0|BP;TPP;FF;FFPOP;CUG;FA;HH;MLC;FFPUA;CUGPL;CUGPV;CUGPP||0*0*1*110T1@0@@1.2345";
+//		RatingComponent rc = RatingComponentFactory.createRatingComponent("ItemCharging");
+//		String params = "0||||0|0|-1%0@3300@1@1|0@@|0@@|0@@|0";
+//		RatingComponent rc = RatingComponentFactory.createRatingComponent("CallWithExtendedServices");
+		String params = "FF:Non Call Services={25@1|0@1|0.006@1|1@0||1|0|1|0!1!0!0|0|@||0@@||0|0|0|||1|0|0|||0|1||;|0|0||1!2|0||20MB$0$$1$0^00:00-00:00%1^00:00-00:00%2^00:00-00:00%3^00:00-00:00%4^00:00-00:00%5^00:00-00:00%6^00:00-00:00||1}?Basic:Non Call Services={25@1|0@1|0.006@1|1@0||1|0|1|0!1!0!0|0|@||0@@||0|0|0|||1|0|0|||0|1||;|0|0||1!2|0||20MB$0$$1$0^00:00-00:00%1^00:00-00:00%2^00:00-00:00%3^00:00-00:00%4^00:00-00:00%5^00:00-00:00%6^00:00-00:00||1}";
+
+//		String params = "Basic:Roaming Free Seconds={1|0|1|0|0|POPROAMDIS@0@0@100@100@1@1@1@1@1@1@1@1@@|0|0|0||60|0|0|0!1!0!0!0!!|###0#0#0#0!0!0!0!0!!#0|#0#00:00:00!0!1#0|0#0#0#0#|0#1#2}";
+//		String params = "FF:Non Call Services={@|@|@|@|0.3|0|0|0|0!1!0!0|0|@||0@@|0|0|0|1|||0|0|0|||1|1||;|1|0||1!2|0|DISCO10!0!0!10!0!0^00:00-00:00#1^00:00-00:00#2^00:00-00:00#3^00:00-00:00#4^00:00-00:00#5^00:00-00:00#6^00:00-00:00|BNSMS$0$$1$0^00:00-00:00%1^00:00-00:00%2^00:00-00:00%3^00:00-00:00%4^00:00-00:00%5^00:00-00:00%6^00:00-00:00||1}?Basic:Non Call Services={@|@|@|@|0.3|0|0|0|0!1!0!0|0|@||0@@|0|0|0|1|||0|0|0|||1|1||;|1|0||1!2|0|DISCO10!0!0!10!0!0^00:00-00:00#1^00:00-00:00#2^00:00-00:00#3^00:00-00:00#4^00:00-00:00#5^00:00-00:00#6^00:00-00:00|BNSMS$0$$1$0^00:00-00:00%1^00:00-00:00%2^00:00-00:00%3^00:00-00:00%4^00:00-00:00%5^00:00-00:00%6^00:00-00:00||1}";
+//		String params = "FF:Non Call Services={@|@|@|@||1|0|0|0!1!0!0|2|@||1@205;1;0;1;0;1;0;1@NET;0;0;1!0!0.1!2!0!0!5!0||0|0|0|||1|0|0|||0|0||;|0|0||1!2|0||||1}?Basic:Non Call Services={@|@|@|@||1|0|0|0!1!0!0|2|@||1@205;1;0;1;0;1;0;1@NET;0;0;1!0!0.1!2!0!0!5!0||0|0|0|||1|0|0|||0|0||;|0|0||1!2|0||||1}";
+//		String params = "FF:Non Call Services={@|@|@|@|0.3|0|0|0|0!1!0!0|0|@||0@@|0|0|0|1|||0|0|0|||1|1||;|1|0||1!2|0|DISCO10!0!0!10!0!0^00:00-00:00#1^00:00-00:00#2^00:00-00:00#3^00:00-00:00#4^00:00-00:00#5^00:00-00:00#6^00:00-00:00|BNSMS$0$$1$0^00:00-00:00%1^00:00-00:00%2^00:00-00:00%3^00:00-00:00%4^00:00-00:00%5^00:00-00:00%6^00:00-00:00||1}?Basic:Non Call Services={@|@|@|@|0.3|0|0|0|0!1!0!0|0|@||0@@|0|0|0|1|||0|0|0|||1|1||;|1|0||1!2|0|DISCO10!0!0!10!0!0^00:00-00:00#1^00:00-00:00#2^00:00-00:00#3^00:00-00:00#4^00:00-00:00#5^00:00-00:00#6^00:00-00:00|BNSMS$0$$1$0^00:00-00:00%1^00:00-00:00%2^00:00-00:00%3^00:00-00:00%4^00:00-00:00%5^00:00-00:00%6^00:00-00:00||1}";
+		RatingComponent rc = RatingComponentFactory.createRatingComponent("PriceTypeExtension");
+//		String params = "123000000";
+//		RatingComponent rc = RatingComponentFactory.createRatingComponent("MTSOnlyPrice");
+//		String params = "21@1|22@1|23000000@2|16@0|1|2";
+//		RatingComponent rc = RatingComponentFactory.createRatingComponent("MTSData");
+//		String params = "00:00:00@1@0|0|0|1|0|0@@0|0#00:00:00@1@0#0#0#0#1!!#0!0!0!0!0@1@2!0!0!!!0!!!!!#0!0!!!!0@1@2|0|0#00:00:00@1@0####0#0#0#0$0$0$1!!#0!0!!!#0!0!!!!0@1@2|0|#0#00:00:00$0$1$0$1!!#0!0!0!0!0@1@2!0!0!!!0!!!!!#0!0!!!!0@1@2|0|#0#00:00:00$0$1$0$#0!0!!!#0!0!!!!0@1@2|1@2@3@0|0|100SMART@1@0|1!0!1!0!0@1@2!1!0!POPCOFU94@21@22%!!0!!!!POPCOFU94@108T1!|1";
+//		RatingComponent rc = RatingComponentFactory.createRatingComponent("CallServices");
+//		String params = "1!1!0!1!16!0!0!0*0*1*1*0*0*0*0*@0@@0|0*1*0#0#@@0@0#0#0!!*0*#0##0#1#1###0$0$0$0$@@0@0*0*#0##1#1###0$0$0$@@0@0#1*0*#0$0$0$0$@@0@0*0*0!!*0*0!0!!!0@1@2!0*0@1@2@3@4*0*#0##1##0$0$0$@@0@0|0|||0*0*0#0#@@0@0#0#0!!*0*#0##0#1#1###0$0$0$0$@@0@0*0*#0##1#1###0$0$0$@@0@0#1*0*#0$0$0$0$@@0@0*0*0!!*0*0!0!!!0@1@2!0*0@1@2@3@4*0*#0##1##0$0$0$@@0@0|FF*1*1*0#0#@@0@0;22@23@21@2#1#1!AMA001@24@25@26!AMA001@1@00:00@00:00;AMA001@2@00:00@00:00;AMA001@3@00:00@00:00;AMA001@4@00:00@00:00;AMA001@5@00:00@00:00;AMA001@6@00:00@00:00;AMA001@0@00:00@00:00*0*#0##0#1#1###0$0$0$0$@@0@0*0*#0##1#1###0$0$0$@@0@0#1*0*#0$0$0$0$@@0@0*0*0!!*0*0!0!!!0@1@2!0*0@1@2@3@4*0*#0##1##0$0$0$@@0@0|0|§§0*0*0#0#@@0@0#0#0!!*0*#0##0#1#1###0$0$0$0$@@0@0*0*#0##1#1###0$0$0$@@0@0#1*0*#0$0$0$0$@@0@0*0*0!!*0*0!0!!!0@1@2!0*0@1@2@3@4*0*#0##1##0$0$0$@@0@0|0|0!!|0|0!0!!!0@1@2!0|TPP;HH;FF;BP";
+//		String params = "1!1!0!1!16!0!0!0*0*1*1*0*0*0*0*@0@@0|0*1*0.000021#0#@@0@0#0#0!!*0*#0##0#1#1###0$0$0$0$@@0@0*0*#0##1#1###0$0$0$@@0@0#1*0*#0$0$0$0$@@0@0*0*0!!*1*1!0!COMO2@1@0@AMA002@1;COMO@0@1@AMA001@82;COMO1@0@1@AMA002@83!COMO@1@00:00@00:00;COMO@2@00:00@00:00;COMO@3@00:00@00:00;COMO@4@00:00@00:00;COMO@5@00:00@00:00;COMO@6@00:00@00:00;COMO@0@00:00@00:00;COMO1@1@00:00@00:00;COMO1@2@00:00@00:00;COMO1@3@00:00@00:00;COMO1@4@00:00@00:00;COMO1@5@00:00@00:00;COMO1@6@00:00@00:00;COMO1@0@00:00@00:00;COMO2@1@00:00@00:00;COMO2@2@00:00@00:00;COMO2@3@00:00@00:00;COMO2@4@00:00@00:00;COMO2@5@00:00@00:00;COMO2@6@00:00@00:00;COMO2@0@00:00@00:00!0@1@2!81*0@1@2@3@4*0*#0##1##0$0$0$@@0@0|0|||0*0*0#0#@@0@0#0#0!!*0*#0##0#1#1###0$0$0$0$@@0@0*0*#0##1#1###0$0$0$@@0@0#1*0*#0$0$0$0$@@0@0*0*0!!*0*0!0!!!0@1@2!0*0@1@2@3@4*0*#0##1##0$0$0$@@0@0||0|§§0*0*0#0#@@0@0#0#0!!*0*#0##0#1#1###0$0$0$0$@@0@0*0*#0##1#1###0$0$0$@@0@0#1*0*#0$0$0$0$@@0@0*0*0!!*0*0!0!!!0@1@2!0*0@1@2@3@4*0*#0##1##0$0$0$@@0@0|0|0!!|0|0!0!!!0@1@2!0|TPP;HH;BP";
+//		RatingComponent rc = RatingComponentFactory.createRatingComponent("VolumeCharging");
+
+		JSONObject cp = rc.parse(params);
+		System.out.println("Отпарсеный цлоб = " + cp.toString());
+		String result = rc.serialize(cp);
+		System.out.println(result);
+/*
+		if (! params1.equals(result)) {
+			System.out.println("ERROR !");
+		}
+*/
+//		ComponentParametersMapper mapper = RatingComponentFactory.createComponentParametersMapper("DurationCharging");
+//		System.out.println(mapper.encode(cp));
+	}
+
+}
